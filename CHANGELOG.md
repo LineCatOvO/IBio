@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - FPM383C-technical-specification.md: FPM383C fingerprint sensor technical specification (v1.0)
 - ATECC608A-technical-specification.md: ATECC608A security chip technical specification (v1.0)
 - communication-technical-specification.md: USB + BLE communication module technical specification (v1.0)
+- hardware-selection-report.md: Hardware selection comprehensive report integrating all ADR and technical specification documents
 
 ## [0.1.0] - 2026-04-06
 
