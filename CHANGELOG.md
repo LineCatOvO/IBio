@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- SRS.md: Software Requirements Specification - comprehensive CTAP protocol functional requirements, biometric features, communication interfaces, security requirements, and acceptance criteria for IBio FIDO2 security key project
 - URD.md: User Requirements Document - comprehensive user profiles, system capabilities, usage scenarios, interaction design, and acceptance criteria for IBio FIDO2 security key project
 - BRD.md: Business Requirements Document - comprehensive analysis of market, competition, cost targets, and feasibility for IBio FIDO2 security key project
 - ADR-001: Architecture choice - ESP32-S3 + FreeRTOS + ESP-IDF
