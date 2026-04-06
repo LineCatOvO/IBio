@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- LLD.md: Low-Level Design document - detailed module design, class diagrams, Flash partition design, data structures, API definitions, state machines, error handling, GPIO19 conflict resolution, and performance budget for IBio FIDO2 security key project
 - SRS.md: Software Requirements Specification - comprehensive CTAP protocol functional requirements, biometric features, communication interfaces, security requirements, and acceptance criteria for IBio FIDO2 security key project
 - URD.md: User Requirements Document - comprehensive user profiles, system capabilities, usage scenarios, interaction design, and acceptance criteria for IBio FIDO2 security key project
 - BRD.md: Business Requirements Document - comprehensive analysis of market, competition, cost targets, and feasibility for IBio FIDO2 security key project

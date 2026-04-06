@@ -2177,13 +2177,660 @@ int ctap_get_aaguid(uint8_t *aaguid);
 
 ## 七、状态机设计
 
-（待补充）
+### 7.1 整体认证流程状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: 设备启动
+    
+    Idle --> USBConnected: USB 连接
+    Idle --> BLEConnected: BLE 连接
+    Idle --> ResetMode: 启动 10 秒内
+    
+    USBConnected --> ChannelInit: 收到 HID INIT
+    BLEConnected --> ChannelInit: 收到 BLE 连接
+    
+    ChannelInit --> WaitingCommand: 通道建立成功
+    
+    WaitingCommand --> ProcessingMakeCred: MakeCredential 命令
+    WaitingCommand --> ProcessingGetAssert: GetAssertion 命令
+    WaitingCommand --> ProcessingGetInfo: GetInfo 命令
+    WaitingCommand --> ProcessingClientPIN: ClientPIN 命令
+    WaitingCommand --> ProcessingReset: Reset 命令
+    WaitingCommand --> ProcessingCredMgmt: CredentialManagement 命令
+    
+    ProcessingGetInfo --> WaitingCommand: 响应完成
+    
+    ProcessingMakeCred --> WaitingUV: 需要 UV
+    ProcessingMakeCred --> GeneratingKey: 无需 UV
+    ProcessingMakeCred --> WaitingCommand: 排除凭证存在
+    
+    WaitingUV --> FingerprintVerify: 指纹验证
+    WaitingUV --> PINVerify: PIN 验证
+    
+    FingerprintVerify --> UVSuccess: 指纹匹配
+    FingerprintVerify --> UVFailed: 指纹不匹配
+    FingerprintVerify --> UVBlocked: 重试耗尽
+    
+    PINVerify --> UVSuccess: PIN 正确
+    PINVerify --> UVFailed: PIN 错误
+    PINVerify --> UVBlocked: 重试耗尽
+    
+    UVSuccess --> GeneratingKey: MakeCredential
+    UVSuccess --> SigningChallenge: GetAssertion
+    
+    UVFailed --> WaitingUV: 继续验证
+    UVFailed --> WaitingCommand: 用户取消
+    
+    UVBlocked --> WaitingCommand: 返回错误
+    
+    GeneratingKey --> CreatingCredential: 密钥生成成功
+    GeneratingKey --> WaitingCommand: 密钥生成失败
+    
+    CreatingCredential --> AttestationSign: 凭证存储成功
+    
+    AttestationSign --> WaitingCommand: 响应完成
+    
+    SigningChallenge --> WaitingCommand: 签名完成
+    
+    ProcessingGetAssert --> FindingCredential: 开始查找
+    FindingCredential --> WaitingUV: 找到凭证
+    FindingCredential --> WaitingCommand: 无凭证
+    
+    ProcessingClientPIN --> WaitingCommand: 响应完成
+    
+    ProcessingReset --> WaitingCommand: 重置完成
+    
+    ProcessingCredMgmt --> WaitingCommand: 响应完成
+    
+    WaitingCommand --> Idle: 断开连接
+    USBConnected --> Idle: USB 断开
+    BLEConnected --> Idle: BLE 断开
+    
+    ResetMode --> ProcessingReset: 收到 Reset
+    ResetMode --> Idle: 10 秒超时
+```
+
+### 7.2 MakeCredential 详细状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> ParseRequest: 收到命令
+    
+    ParseRequest --> CheckExcludeList: 解析成功
+    ParseRequest --> ErrorResponse: 解析失败
+    
+    CheckExcludeList --> CheckAlgorithm: 无排除
+    CheckExcludeList --> ErrorResponse: 凭证已存在
+    
+    CheckAlgorithm --> CheckOptions: 支持 ES256
+    CheckAlgorithm --> ErrorResponse: 不支持算法
+    
+    CheckOptions --> RequestUV: uv=true
+    CheckOptions --> RequestUP: uv=false, up=true
+    CheckOptions --> GenerateKey: uv=false, up=false
+    
+    RequestUV --> WaitFingerprint: 指纹可用
+    RequestUV --> WaitPIN: 仅 PIN 可用
+    
+    WaitFingerprint --> CaptureFingerprint: 触摸检测
+    CaptureFingerprint --> MatchFingerprint: 采集完成
+    MatchFingerprint --> UVSuccess: 匹配成功
+    MatchFingerprint --> UVFailed: 匹配失败
+    MatchFingerprint --> UVBlocked: 重试耗尽
+    
+    WaitPIN --> ReceivePIN: PIN 输入
+    ReceivePIN --> VerifyPIN: PIN 收到
+    VerifyPIN --> UVSuccess: PIN 正确
+    VerifyPIN --> UVFailed: PIN 错误
+    VerifyPIN --> UVBlocked: 重试耗尽
+    
+    UVFailed --> WaitFingerprint: 继续验证
+    UVFailed --> ErrorResponse: 用户取消
+    UVBlocked --> ErrorResponse: 锁定
+    
+    RequestUP --> WaitTouch: up=true
+    WaitTouch --> UPConfirmed: 触摸检测
+    UPConfirmed --> GenerateKey: 确认
+    
+    UVSuccess --> GenerateKey: 继续
+    
+    GenerateKey --> StoreCredential: 生成成功
+    GenerateKey --> ErrorResponse: 生成失败
+    
+    StoreCredential --> CreateAuthData: 存储成功
+    StoreCredential --> ErrorResponse: 存储失败
+    
+    CreateAuthData --> AttestationSign: 创建成功
+    
+    AttestationSign --> BuildResponse: 签名成功
+    AttestationSign --> ErrorResponse: 签名失败
+    
+    BuildResponse --> [*]: 响应完成
+    
+    ErrorResponse --> [*]: 返回错误
+```
+
+### 7.3 GetAssertion 详细状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> ParseRequest: 收到命令
+    
+    ParseRequest --> CalculateRpIdHash: 解析成功
+    ParseRequest --> ErrorResponse: 解析失败
+    
+    CalculateRpIdHash --> FindCredential: 计算 RP ID 哈希
+    
+    FindCredential --> CredentialFound: allowList 匹配
+    FindCredential --> SearchResidentCred: 无 allowList
+    FindCredential --> ErrorResponse: 无凭证
+    
+    SearchResidentCred --> CredentialFound: 找到 Resident Cred
+    SearchResidentCred --> ErrorResponse: 无 Resident Cred
+    
+    CredentialFound --> CheckOptions: 找到凭证
+    
+    CheckOptions --> RequestUV: uv=true
+    CheckOptions --> RequestUP: uv=false, up=true
+    CheckOptions --> BuildAuthData: uv=false, up=false
+    
+    RequestUV --> WaitFingerprint: 指纹可用
+    RequestUV --> WaitPIN: 仅 PIN 可用
+    
+    WaitFingerprint --> CaptureFingerprint: 触摸检测
+    CaptureFingerprint --> MatchFingerprint: 采集完成
+    MatchFingerprint --> IdentifyUser: 匹配成功
+    MatchFingerprint --> UVFailed: 匹配失败
+    MatchFingerprint --> UVBlocked: 重试耗尽
+    
+    IdentifyUser --> BuildAuthData: 用户识别
+    
+    WaitPIN --> ReceivePIN: PIN 输入
+    ReceivePIN --> VerifyPIN: PIN 收到
+    VerifyPIN --> BuildAuthData: PIN 正确
+    VerifyPIN --> UVFailed: PIN 错误
+    VerifyPIN --> UVBlocked: 重试耗尽
+    
+    UVFailed --> WaitFingerprint: 继续验证
+    UVFailed --> ErrorResponse: 用户取消
+    UVBlocked --> ErrorResponse: 锁定
+    
+    RequestUP --> WaitTouch: up=true
+    WaitTouch --> UPConfirmed: 触摸检测
+    UPConfirmed --> BuildAuthData: 确认
+    
+    BuildAuthData --> SignChallenge: 构建认证数据
+    
+    SignChallenge --> BuildResponse: 签名成功
+    SignChallenge --> ErrorResponse: 签名失败
+    
+    BuildResponse --> [*]: 响应完成
+    
+    ErrorResponse --> [*]: 返回错误
+```
+
+### 7.4 指纹验证状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: 模块初始化
+    
+    Idle --> WaitTouch: 开始验证
+    
+    WaitTouch --> TouchDetected: GPIO 中断
+    WaitTouch --> Timeout: 超时
+    WaitTouch --> Cancelled: 用户取消
+    
+    TouchDetected --> CaptureImage: 触摸检测
+    
+    CaptureImage --> EvaluateQuality: 采集完成
+    CaptureImage --> CaptureFailed: 采集失败
+    
+    EvaluateQuality --> MatchTemplate: 质量合格
+    EvaluateQuality --> RequestRetry: 质量不合格
+    
+    RequestRetry --> CaptureImage: 再次采集
+    RequestRetry --> CaptureFailed: 超过最大重试
+    
+    MatchTemplate --> MatchSuccess: 匹配成功
+    MatchTemplate --> MatchFailed: 匹配失败
+    MatchTemplate --> SearchTemplate: 1:N 搜索
+    
+    SearchTemplate --> MatchSuccess: 找到匹配
+    SearchTemplate --> MatchFailed: 未找到
+    
+    MatchSuccess --> ReturnResult: 返回成功
+    MatchFailed --> CheckRetries: 检查重试
+    
+    CheckRetries --> WaitTouch: 有剩余重试
+    CheckRetries --> UVBlocked: 重试耗尽
+    
+    ReturnResult --> [*]: 验证完成
+    
+    UVBlocked --> [*]: 返回锁定
+    
+    CaptureFailed --> [*]: 返回失败
+    
+    Timeout --> [*]: 返回超时
+    
+    Cancelled --> [*]: 返回取消
+```
+
+### 7.5 指纹注册状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: 开始注册
+    
+    Idle --> WaitTouch: 采集第 1 次
+    
+    WaitTouch --> TouchDetected: GPIO 中断
+    WaitTouch --> Timeout: 超时
+    WaitTouch --> Cancelled: 用户取消
+    
+    TouchDetected --> CaptureImage: 触摸检测
+    
+    CaptureImage --> EvaluateQuality: 采集完成
+    CaptureImage --> CaptureFailed: 采集失败
+    
+    EvaluateQuality --> StoreFeature: 质量合格
+    EvaluateQuality --> RequestRetry: 质量不合格
+    
+    RequestRetry --> WaitTouch: 再次采集
+    RequestRetry --> CaptureFailed: 超过最大重试
+    
+    StoreFeature --> CheckCaptureCount: 存储特征
+    
+    CheckCaptureCount --> WaitTouch: 需要更多采集
+    CheckCaptureCount --> GenerateTemplate: 采集足够（3-5 次）
+    
+    GenerateTemplate --> TemplateSuccess: 生成成功
+    GenerateTemplate --> TemplateFailed: 生成失败
+    
+    TemplateSuccess --> StoreTemplateID: 存储模板 ID
+    
+    StoreTemplateID --> CreateMapping: 存储成功
+    StoreTemplateID --> TemplateFailed: 存储失败
+    
+    CreateMapping --> RegistrationComplete: 映射创建
+    
+    RegistrationComplete --> [*]: 注册成功
+    
+    TemplateFailed --> [*]: 注册失败
+    
+    CaptureFailed --> [*]: 注册失败
+    
+    Timeout --> [*]: 注册超时
+    
+    Cancelled --> [*]: 注册取消
+```
+
+### 7.6 USB HID 通信状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> Disconnected: USB 初始化
+    
+    Disconnected --> Connected: USB 连接
+    
+    Connected --> WaitingInit: HID 接口激活
+    
+    WaitingInit --> ChannelAllocated: 收到 INIT 命令
+    WaitingInit --> Disconnected: USB 断开
+    
+    ChannelAllocated --> WaitingReport: 通道建立
+    
+    WaitingReport --> ProcessingInit: INIT 报告
+    WaitingReport --> ProcessingPing: PING 报告
+    WaitingReport --> ProcessingMsg: MSG 报告
+    WaitingReport --> ProcessingCancel: CANCEL 报告
+    WaitingReport --> ProcessingLock: LOCK 报告
+    WaitingReport --> ProcessingWink: WINK 报告
+    
+    ProcessingInit --> SendResponse: 处理完成
+    ProcessingPing --> SendResponse: 处理完成
+    ProcessingMsg --> FragmentReceive: 大消息
+    
+    FragmentReceive --> FragmentContinue: 收到分片
+    FragmentReceive --> MessageComplete: 所有分片收到
+    FragmentContinue --> FragmentReceive: 继续接收
+    
+    MessageComplete --> CTAPProcess: 消息完整
+    CTAPProcess --> FragmentSend: 响应生成
+    
+    FragmentSend --> SendFragment: 分片发送
+    SendFragment --> FragmentSend: 继续发送
+    SendFragment --> SendResponse: 发送完成
+    
+    ProcessingCancel --> CancelOperation: 取消
+    CancelOperation --> WaitingReport: 取消完成
+    
+    ProcessingLock --> LockChannel: 锁定
+    LockChannel --> WaitingReport: 锁定完成
+    
+    ProcessingWink --> WinkLED: LED 闪烁
+    WinkLED --> SendResponse: 闪烁完成
+    
+    SendResponse --> WaitingReport: 响应发送
+    
+    WaitingReport --> Disconnected: USB 断开
+    
+    Disconnected --> [*]: USB 断开
+```
+
+### 7.7 BLE GATT 通信状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: BLE 初始化
+    
+    Idle --> Advertising: 开始广播
+    
+    Advertising --> Connecting: 收到连接请求
+    Advertising --> Idle: 停止广播
+    
+    Connecting --> Connected: 连接建立
+    Connecting --> Advertising: 连接失败
+    
+    Connected --> MTUNegotiation: MTU 协商
+    MTUNegotiation --> ServiceDiscovery: MTU 确定
+    
+    ServiceDiscovery --> WaitingWrite: 服务发现完成
+    ServiceDiscovery --> Disconnected: 断开连接
+    
+    WaitingWrite --> ProcessingControlPoint: Control Point 写入
+    WaitingWrite --> ReadingRevision: 读取版本
+    WaitingWrite --> Disconnected: 断开连接
+    
+    ReadingRevision --> SendRevision: 版本响应
+    SendRevision --> WaitingWrite: 响应发送
+    
+    ProcessingControlPoint --> FragmentReceive: 大消息
+    ProcessingControlPoint --> MessageComplete: 小消息
+    
+    FragmentReceive --> FragmentContinue: 收到分片
+    FragmentReceive --> MessageComplete: 所有分片收到
+    FragmentContinue --> FragmentReceive: 继续接收
+    
+    MessageComplete --> CTAPProcess: 消息完整
+    CTAPProcess --> FragmentSend: 响应生成
+    
+    FragmentSend --> NotifyFragment: 分片通知
+    NotifyFragment --> FragmentSend: 继续通知
+    NotifyFragment --> NotifyComplete: 发送完成
+    
+    NotifyComplete --> WaitingWrite: 等待下一命令
+    
+    WaitingWrite --> Disconnected: 断开连接
+    
+    Disconnected --> Idle: 断开完成
+    Disconnected --> Advertising: 重新广播
+    
+    Idle --> [*]: BLE 关闭
+```
 
 ---
 
 ## 八、错误处理机制
 
-（待补充）
+### 8.1 CTAP 错误码表
+
+**标准 CTAP 错误码（CTAP2 规范定义）**：
+
+| 错误码 | 名称 | 描述 | 处理建议 |
+|--------|------|------|----------|
+| **0x00** | CTAP1_SUCCESS | 操作成功 | 正常响应 |
+| **0x01** | CTAP2_ERR_INVALID_COMMAND | 无效命令 | 返回错误响应 |
+| **0x02** | CTAP2_ERR_INVALID_PARAMETER | 无效参数 | 检查 CBOR 参数 |
+| **0x03** | CTAP2_ERR_INVALID_LENGTH | 无效长度 | 检查数据长度 |
+| **0x04** | CTAP2_ERR_INVALID_SEQ | 无效序列号 | HID 分片错误 |
+| **0x05** | CTAP2_ERR_TIMEOUT | 操作超时 | 重新发起请求 |
+| **0x06** | CTAP2_ERR_CHANNEL_BUSY | 通道忙 | 等待后重试 |
+| **0x07** | CTAP2_ERR_LOCK_REQUIRED | 需要锁定 | 先执行 LOCK |
+| **0x08** | CTAP2_ERR_INVALID_CHANNEL | 无效通道 | 重新 INIT |
+| **0x09** | CTAP2_ERR_CBOR_UNEXPECTED_TYPE | CBOR 类型错误 | 检查 CBOR 格式 |
+| **0x0A** | CTAP2_ERR_INVALID_CBOR | 无效 CBOR | 检查 CBOR 编码 |
+| **0x0B** | CTAP2_ERR_MISSING_PARAMETER | 缺少参数 | 补充必需参数 |
+| **0x0C** | CTAP2_ERR_LIMIT_EXCEEDED | 超出限制 | 减少请求量 |
+| **0x0D** | CTAP2_ERR_UNSUPPORTED_EXTENSION | 不支持扩展 | 移除扩展参数 |
+| **0x0E** | CTAP2_ERR_CREDENTIAL_EXCLUDED | 凭证已排除 | 使用其他凭证 |
+| **0x0F** | CTAP2_ERR_PROCESSING | 正在处理 | 等待 KEEPALIVE |
+| **0x10** | CTAP2_ERR_INVALID_CREDENTIAL | 无效凭证 | 检查凭证 ID |
+| **0x11** | CTAP2_ERR_USER_ACTION_PENDING | 用户操作等待 | 等待用户操作 |
+| **0x12** | CTAP2_ERR_OPERATION_PENDING | 操作等待 | 继续等待 |
+| **0x13** | CTAP2_ERR_UNSUPPORTED_ALGORITHM | 不支持算法 | 使用 ES256 |
+| **0x14** | CTAP2_ERR_UNSUPPORTED_OPTION | 不支持选项 | 检查 options |
+| **0x15** | CTAP2_ERR_UNSUPPORTED_PIN_METHOD | 不支持 PIN 方法 | 检查 pinUvAuthProtocol |
+| **0x16** | CTAP2_ERR_UV_BLOCKED | UV 锁定 | 等待解锁或重置 |
+| **0x17** | CTAP2_ERR_PIN_BLOCKED | PIN 锁定 | 等待重置 |
+| **0x18** | CTAP2_ERR_PIN_AUTH_BLOCKED | PIN 认证锁定 | 等待解锁 |
+| **0x19** | CTAP2_ERR_UV_AUTH_BLOCKED | UV 认证锁定 | 等待解锁 |
+| **0x1A** | CTAP2_ERR_NO_CREDENTIALS | 无凭证 | 注册新凭证 |
+| **0x1B** | CTAP2_ERR_SPECIFICATION_MISMATCH | 规范不匹配 | 检查协议版本 |
+| **0x1C** | CTAP2_ERR_PIN_NOT_SET | PIN 未设置 | 先设置 PIN |
+| **0x1D** | CTAP2_ERR_UV_NOT_AVAILABLE | UV 不可用 | 检查指纹配置 |
+| **0x1E** | CTAP2_ERR_UV_NOT_SET | UV 未配置 | 先配置指纹 |
+| **0x1F** | CTAP2_ERR_UV_INVALID | UV 无效 | 重新验证 |
+| **0x20** | CTAP2_ERR_UV_RETRY_LIMIT | UV 重试耗尽 | 等待解锁 |
+| **0x21** | CTAP2_ERR_UV_RETRY_LIMIT_REACHED | UV 重试次数已达 | 等待解锁 |
+| **0x22** | CTAP2_ERR_ACTION_TIMEOUT | 操作超时 | 重新操作 |
+| **0x23** | CTAP2_ERR_UP_REQUIRED | 需要 UP | 用户确认 |
+| **0x24** | CTAP2_ERR_UV_REQUIRED | 需要 UV | 用户验证 |
+| **0x25** | CTAP2_ERR_UV_ACCURACY_LIMIT | UV 精度限制 | 重新注册指纹 |
+| **0x26** | CTAP2_ERR_NO_UP | 无 UP | 用户在场确认 |
+| **0x27** | CTAP2_ERR_NO_UV | 无 UV | 用户验证 |
+| **0x28** | CTAP2_ERR_UV_ACCURACY_INSUFFICIENT | UV 精度不足 | 重新采集指纹 |
+| **0x29** | CTAP2_ERR_PIN_AUTH_INVALID | PIN 认证无效 | 重新验证 PIN |
+| **0x2A** | CTAP2_ERR_REQUEST_TOO_LARGE | 请求过大 | 减小请求大小 |
+| **0x2B** | CTAP2_ERR_KEY_STORE_FULL | 密钥存储满 | 删除旧凭证 |
+| **0x2C** | CTAP2_ERR_NOT_ALLOWED | 操作不允许 | 检查操作权限 |
+| **0x2D** | CTAP2_ERR_USER_VERIFICATION_TIMEOUT | UV 超时 | 重新验证 |
+| **0x2E** | CTAP2_ERR_USER_PRESENCE_TIMEOUT | UP 超时 | 重新确认 |
+| **0x2F** | CTAP2_ERR_VENDOR_FIRST | 厂商自定义起始 | - |
+| **0xFF** | CTAP2_ERR_VENDOR_LAST | 厂商自定义结束 | - |
+
+**HID 错误码（FIDO HID 规范定义）**：
+
+| 错误码 | 名称 | 描述 |
+|--------|------|------|
+| **0x01** | ERR_INVALID_CMD | 无效 HID 命令 |
+| **0x02** | ERR_INVALID_PAR | 无效参数 |
+| **0x03** | ERR_INVALID_LEN | 无效长度 |
+| **0x04** | ERR_INVALID_SEQ | 无效序列号 |
+| **0x05** | ERR_MSG_TIMEOUT | 消息超时 |
+| **0x06** | ERR_CHANNEL_BUSY | 通道忙 |
+| **0x07** | ERR_LOCK_REQUIRED | 需要锁定 |
+| **0x08** | ERR_INVALID_CHANNEL | 无效通道 |
+| **0x09** | ERR_OTHER | 其他错误 |
+
+---
+
+### 8.2 内部错误码
+
+**IBio 内部错误码（用于模块间通信和日志）**：
+
+| 错误码范围 | 模块 | 说明 |
+|------------|------|------|
+| **0x1000-0x10FF** | HAL 层 | 硬件抽象层错误 |
+| **0x2000-0x20FF** | 安全模块 | 安全模块错误 |
+| **0x3000-0x30FF** | 指纹模块 | 指纹模块错误 |
+| **0x4000-0x40FF** | CTAP 协议栈 | CTAP 协议错误 |
+| **0x5000-0x50FF** | 通信模块 | 通信模块错误 |
+| **0x6000-0x60FF** | 存储模块 | 存储模块错误 |
+| **0x7000-0x70FF** | 系统级 | 系统级错误 |
+
+**HAL 层错误码详细定义**：
+
+| 错误码 | 名称 | 描述 |
+|--------|------|------|
+| **0x1000** | HAL_OK | 成功 |
+| **0x1001** | HAL_ERR_GPIO_INIT | GPIO 初始化失败 |
+| **0x1002** | HAL_ERR_GPIO_READ | GPIO 读取失败 |
+| **0x1003** | HAL_ERR_GPIO_WRITE | GPIO 写入失败 |
+| **0x1004** | HAL_ERR_UART_INIT | UART 初始化失败 |
+| **0x1005** | HAL_ERR_UART_READ | UART 读取失败 |
+| **0x1006** | HAL_ERR_UART_WRITE | UART 写入失败 |
+| **0x1007** | HAL_ERR_UART_TIMEOUT | UART 超时 |
+| **0x1008** | HAL_ERR_I2C_INIT | I2C 初始化失败 |
+| **0x1009** | HAL_ERR_I2C_READ | I2C 读取失败 |
+| **0x100A** | HAL_ERR_I2C_WRITE | I2C 写入失败 |
+| **0x100B** | HAL_ERR_I2C_TIMEOUT | I2C 超时 |
+| **0x100C** | HAL_ERR_I2C_NACK | I2C NACK |
+| **0x100D** | HAL_ERR_USB_INIT | USB 初始化失败 |
+| **0x100E** | HAL_ERR_USB_SEND | USB 发送失败 |
+| **0x100F** | HAL_ERR_USB_RECV | USB 接收失败 |
+| **0x1010** | HAL_ERR_BLE_INIT | BLE 初始化失败 |
+| **0x1011** | HAL_ERR_BLE_SEND | BLE 发送失败 |
+| **0x1012** | HAL_ERR_BLE_TIMEOUT | BLE 超时 |
+| **0x1013** | HAL_ERR_FLASH_READ | Flash 读取失败 |
+| **0x1014** | HAL_ERR_FLASH_WRITE | Flash 写入失败 |
+| **0x1015** | HAL_ERR_FLASH_ERASE | Flash 擦除失败 |
+| **0x1016** | HAL_ERR_FLASH_TIMEOUT | Flash 超时 |
+| **0x1017** | HAL_ERR_NVS_READ | NVS 读取失败 |
+| **0x1018** | HAL_ERR_NVS_WRITE | NVS 写入失败 |
+| **0x1019** | HAL_ERR_NVS_NOT_FOUND | NVS 键不存在 |
+
+**安全模块错误码详细定义**：
+
+| 错误码 | 名称 | 描述 |
+|--------|------|------|
+| **0x2000** | SEC_OK | 成功 |
+| **0x2001** | SEC_ERR_INIT | 安全模块初始化失败 |
+| **0x2002** | SEC_ERR_ATECC_NOT_FOUND | ATECC608A 未找到 |
+| **0x2003** | SEC_ERR_ATECC_COMM | ATECC608A 通信失败 |
+| **0x2004** | SEC_ERR_ATECC_TIMEOUT | ATECC608A 超时 |
+| **0x2005** | SEC_ERR_ATECC_CRC | ATECC608A CRC 错误 |
+| **0x2006** | SEC_ERR_KEY_GEN | 密钥生成失败 |
+| **0x2007** | SEC_ERR_KEY_SIGN | 签名失败 |
+| **0x2008** | SEC_ERR_KEY_ECDH | ECDH 失败 |
+| **0x2009** | SEC_ERR_SLOT_FULL | 密钥槽位满 |
+| **0x200A** | SEC_ERR_SLOT_NOT_FOUND | 密钥槽位未找到 |
+| **0x200B** | SEC_ERR_SLOT_LOCKED | 密钥槽位锁定 |
+| **0x200C** | SEC_ERR_SHA256 | SHA-256 失败 |
+| **0x200D** | SEC_ERR_AES_ENCRYPT | AES 加密失败 |
+| **0x200E** | SEC_ERR_AES_DECRYPT | AES 解密失败 |
+| **0x200F** | SEC_ERR_RANDOM | 随机数生成失败 |
+| **0x2010** | SEC_ERR_UV_INIT | UV 初始化失败 |
+| **0x2011** | SEC_ERR_UV_PIN_INVALID | PIN 无效 |
+| **0x2012** | SEC_ERR_UV_PIN_RETRY | PIN 重试耗尽 |
+| **0x2013** | SEC_ERR_UV_FINGERPRINT_FAILED | 指纹验证失败 |
+| **0x2014** | SEC_ERR_UV_FINGERPRINT_BLOCKED | 指纹验证锁定 |
+| **0x2015** | SEC_ERR_UV_TIMEOUT | UV 超时 |
+
+**指纹模块错误码详细定义**：
+
+| 错误码 | 名称 | 描述 |
+|--------|------|------|
+| **0x3000** | FP_OK | 成功 |
+| **0x3001** | FP_ERR_INIT | 指纹模块初始化失败 |
+| **0x3002** | FP_ERR_COMM | 指纹模块通信失败 |
+| **0x3003** | FP_ERR_TIMEOUT | 指纹模块超时 |
+| **0x3004** | FP_ERR_CAPTURE_FAILED | 采集失败 |
+| **0x3005** | FP_ERR_CAPTURE_QUALITY | 采集质量不足 |
+| **0x3006** | FP_ERR_CAPTURE_TIMEOUT | 采集超时 |
+| **0x3007** | FP_ERR_CAPTURE_NO_FINGER | 无手指 |
+| **0x3008** | FP_ERR_MATCH_FAILED | 比对失败 |
+| **0x3009** | FP_ERR_MATCH_NO_TEMPLATE | 无模板 |
+| **0x300A** | FP_ERR_MATCH_LOW_SCORE | 匹配分数过低 |
+| **0x300B** | FP_ERR_ENROLL_FAILED | 注册失败 |
+| **0x300C** | FP_ERR_ENROLL_QUALITY | 注册质量不足 |
+| **0x300D** | FP_ERR_ENROLL_NOT_COMPLETE | 注册未完成 |
+| **0x300E** | FP_ERR_TEMPLATE_FULL | 模板库满 |
+| **0x300F** | FP_ERR_TEMPLATE_NOT_FOUND | 模板未找到 |
+| **0x3010** | FP_ERR_TEMPLATE_DELETE | 模板删除失败 |
+| **0x3011** | FP_ERR_SENSOR_ERROR | 传感器错误 |
+
+**CTAP 协议栈错误码详细定义**：
+
+| 错误码 | 名称 | 描述 |
+|--------|------|------|
+| **0x4000** | CTAP_OK | 成功 |
+| **0x4001** | CTAP_ERR_CBOR_PARSE | CBOR 解析失败 |
+| **0x4002** | CTAP_ERR_CBOR_BUILD | CBOR 构建失败 |
+| **0x4003** | CTAP_ERR_CMD_INVALID | 无效命令 |
+| **0x4004** | CTAP_ERR_PARAM_MISSING | 缺少参数 |
+| **0x4005** | CTAP_ERR_PARAM_INVALID | 无效参数 |
+| **0x4006** | CTAP_ERR_ALGO_UNSUPPORTED | 不支持算法 |
+| **0x4007** | CTAP_ERR_CRED_NOT_FOUND | 凭证未找到 |
+| **0x4008** | CTAP_ERR_CRED_EXCLUDED | 凭证排除 |
+| **0x4009** | CTAP_ERR_UV_REQUIRED | 需要 UV |
+| **0x400A** | CTAP_ERR_UP_REQUIRED | 需要 UP |
+| **0x400B** | CTAP_ERR_UV_FAILED | UV 失败 |
+| **0x400C** | CTAP_ERR_SIGN_FAILED | 签名失败 |
+| **0x400D** | CTAP_ERR_ATTEST_FAILED | Attestation 失败 |
+| **0x400E** | CTAP_ERR_RESET_FAILED | 重置失败 |
+| **0x400F** | CTAP_ERR_STORAGE_FAILED | 存储失败 |
+| **0x4010** | CTAP_ERR_PIN_PROTOCOL | PIN 协议错误 |
+| **0x4011** | CTAP_ERR_KEY_GEN_FAILED | 密钥生成失败 |
+
+**通信模块错误码详细定义**：
+
+| 错误码 | 名称 | 描述 |
+|--------|------|------|
+| **0x5000** | COMM_OK | 成功 |
+| **0x5001** | COMM_ERR_USB_INIT | USB 初始化失败 |
+| **0x5002** | COMM_ERR_USB_SEND | USB 发送失败 |
+| **0x5003** | COMM_ERR_USB_RECV | USB 接收失败 |
+| **0x5004** | COMM_ERR_USB_DISCONNECT | USB 断开 |
+| **0x5005** | COMM_ERR_BLE_INIT | BLE 初始化失败 |
+| **0x5006** | COMM_ERR_BLE_ADVERTISE | BLE 广播失败 |
+| **0x5007** | COMM_ERR_BLE_CONNECT | BLE 连接失败 |
+| **0x5008** | COMM_ERR_BLE_SEND | BLE 发送失败 |
+| **0x5009** | COMM_ERR_BLE_RECV | BLE 接收失败 |
+| **0x500A** | COMM_ERR_BLE_DISCONNECT | BLE 断开 |
+| **0x500B** | COMM_ERR_BLE_MTU | BLE MTU 协商失败 |
+| **0x500C** | COMM_ERR_FRAGMENT_SEND | 分片发送失败 |
+| **0x500D** | COMM_ERR_FRAGMENT_RECV | 分片接收失败 |
+| **0x500E** | COMM_ERR_CHANNEL_ALLOC | 通道分配失败 |
+| **0x500F** | COMM_ERR_CHANNEL_INVALID | 无效通道 |
+| **0x5010** | COMM_ERR_TIMEOUT | 通信超时 |
+
+**存储模块错误码详细定义**：
+
+| 错误码 | 名称 | 描述 |
+|--------|------|------|
+| **0x6000** | STORE_OK | 成功 |
+| **0x6001** | STORE_ERR_INIT | 存储初始化失败 |
+| **0x6002** | STORE_ERR_READ | 存储读取失败 |
+| **0x6003** | STORE_ERR_WRITE | 存储写入失败 |
+| **0x6004** | STORE_ERR_ERASE | 存储擦除失败 |
+| **0x6005** | STORE_ERR_CRED_NOT_FOUND | 凭证未找到 |
+| **0x6006** | STORE_ERR_CRED_FULL | 凭证存储满 |
+| **0x6007** | STORE_ERR_CRED_INVALID | 无效凭证 |
+| **0x6008** | STORE_ERR_CONFIG_NOT_FOUND | 配置未找到 |
+| **0x6009** | STORE_ERR_CONFIG_INVALID | 无效配置 |
+| **0x600A** | STORE_ERR_MAPPING_NOT_FOUND | 映射未找到 |
+| **0x600B** | STORE_ERR_MAPPING_FULL | 映射存储满 |
+| **0x600C** | STORE_ERR_NVS_READ | NVS 读取失败 |
+| **0x600D** | STORE_ERR_NVS_WRITE | NVS 写入失败 |
+
+---
+
+### 8.3 错误处理策略
+
+| 错误类型 | 处理策略 | 说明 |
+|----------|----------|------|
+| **可恢复错误** | 返回错误码，等待重试 | 通信超时、UV 失败等 |
+| **不可恢复错误** | 返回错误码，终止操作 | 硬件故障、存储损坏等 |
+| **锁定错误** | 返回锁定错误码，等待重置 | PIN/UV 锁定 |
+| **取消错误** | 返回取消状态，清理资源 | 用户取消操作 |
+
+**错误转换映射**：
+
+| 内部错误码 | CTAP 错误码 | 转换规则 |
+|------------|-------------|----------|
+| HAL_ERR_UART_TIMEOUT | CTAP2_ERR_TIMEOUT | 超时转换 |
+| SEC_ERR_KEY_SIGN | CTAP2_ERR_PROCESSING | 签名失败 |
+| SEC_ERR_UV_PIN_INVALID | CTAP2_ERR_PIN_AUTH_INVALID | PIN 无效 |
+| SEC_ERR_UV_PIN_RETRY | CTAP2_ERR_PIN_BLOCKED | PIN 锁定 |
+| SEC_ERR_UV_FINGERPRINT_FAILED | CTAP2_ERR_UV_INVALID | UV 无效 |
+| SEC_ERR_UV_FINGERPRINT_BLOCKED | CTAP2_ERR_UV_BLOCKED | UV 锁定 |
+| FP_ERR_CAPTURE_TIMEOUT | CTAP2_ERR_USER_ACTION_TIMEOUT | 采集超时 |
+| FP_ERR_MATCH_FAILED | CTAP2_ERR_UV_INVALID | 比对失败 |
+| CTAP_ERR_CRED_NOT_FOUND | CTAP2_ERR_NO_CREDENTIALS | 凭证未找到 |
+| CTAP_ERR_ALGO_UNSUPPORTED | CTAP2_ERR_UNSUPPORTED_ALGORITHM | 算法不支持 |
+| STORE_ERR_CRED_FULL | CTAP2_ERR_KEY_STORE_FULL | 存储满 |
 
 ---
 
@@ -2334,10 +2981,419 @@ void ibio_gpio_init(void) {
 
 ## 十、性能预算
 
-（待补充）
+### 10.1 整体性能指标
+
+| 性能指标 | 目标值 | 说明 |
+|----------|--------|------|
+| **认证总时间** | < 2 秒 | 从触摸到签名完成 |
+| **注册总时间** | < 30 秒 | MakeCredential 完成 |
+| **唤醒时间** | < 100 ms | 从休眠到就绪 |
+| **通信延迟** | < 50 ms | USB/BLE 通信延迟 |
+| **功耗（待机）** | < 1 mA | USB/BLE 待机功耗 |
+| **功耗（工作）** | < 100 mA | 认证操作功耗 |
+
+### 10.2 HAL 层性能指标
+
+| 模块 | 操作 | 目标时间 | 备注 |
+|------|------|----------|------|
+| **GPIO** | 初始化 | < 1 ms | 批量初始化 |
+| **GPIO** | 读取/写入 | < 10 μs | 单次操作 |
+| **GPIO** | 中断响应 | < 100 μs | 中断延迟 |
+| **UART** | 初始化 | < 10 ms | 包含缓冲区分配 |
+| **UART** | 发送（64 字节） | < 12 ms | @57600 bps |
+| **UART** | 接收（64 字节） | < 12 ms | @57600 bps |
+| **I2C** | 初始化 | < 5 ms | 总线初始化 |
+| **I2C** | 读/写（32 字节） | < 2 ms | @400 kHz |
+| **I2C** | 设备探测 | < 1 ms | 地址探测 |
+| **USB** | 初始化 | < 100 ms | HID 设备枚举 |
+| **USB** | 发送/接收 | < 5 ms | 64 字节报告 |
+| **BLE** | 初始化 | < 500 ms | 协议栈启动 |
+| **BLE** | 广播启动 | < 100 ms | 开始广播 |
+| **BLE** | 连接建立 | < 1 秒 | 连接时间 |
+| **BLE** | 发送/接收 | < 10 ms | GATT 操作 |
+| **Flash** | 读取（1 KB） | < 1 ms | 分区读取 |
+| **Flash** | 写入（1 KB） | < 10 ms | 分区写入 |
+| **Flash** | 擦除（4 KB） | < 50 ms | 扇区擦除 |
+| **NVS** | 读/写 | < 5 ms | 键值操作 |
+
+### 10.3 安全模块性能指标
+
+| 操作 | 目标时间 | 实现方式 | 备注 |
+|------|----------|----------|------|
+| **ATECC608A 初始化** | < 50 ms | I2C 通信 | 芯片唤醒 |
+| **ATECC608A 信息读取** | < 10 ms | I2C 读取 | 序列号等 |
+| **密钥生成（ES256）** | < 100 ms | ATECC608A GenKey | 硬件生成 |
+| **公钥读取** | < 20 ms | ATECC608A GetPubKey | 65 字节 |
+| **ES256 签名** | < 100 ms | ATECC608A Sign | 64 字节签名 |
+| **ECDH 密钥协商** | < 100 ms | ATECC608A ECDH | 32 字节共享密钥 |
+| **SHA-256（32 字节）** | < 10 ms | ATECC608A/ESP32 | 硬件加速 |
+| **SHA-256（1 KB）** | < 20 ms | ESP32-S3 硬件 | 硬件加速 |
+| **AES-128 加密（16 字节）** | < 1 ms | ESP32-S3 硬件 | 硬件加速 |
+| **AES-128 解密（16 字节）** | < 1 ms | ESP32-S3 硬件 | 硬件加速 |
+| **随机数生成（32 字节）** | < 10 ms | ATECC608A TRNG | 真随机数 |
+
+### 10.4 指纹模块性能指标
+
+| 操作 | 目标时间 | 备注 |
+|------|----------|------|
+| **FPM383C 初始化** | < 200 ms | 模块唤醒 |
+| **FPM383C 状态检查** | < 50 ms | 模块状态 |
+| **指纹采集（单次）** | < 500 ms | 包含手指检测 |
+| **指纹图像质量评估** | < 100 ms | 质量分数 |
+| **指纹 1:1 比对** | < 300 ms | 与指定模板比对 |
+| **指纹 1:N 搜索** | < 500 ms | 搜索所有模板（10 个） |
+| **指纹注册（完整）** | < 30 秒 | 3-5 次采集 |
+| **模板删除** | < 100 ms | 删除单个模板 |
+| **模板库清空** | < 1 秒 | 删除所有模板 |
+
+### 10.5 CTAP 协议栈性能指标
+
+| 操作 | 目标时间 | 细分时间 | 备注 |
+|------|----------|----------|------|
+| **GetInfo** | < 50 ms | 解析 + 响应 | 最快命令 |
+| **MakeCredential** | < 2 秒 | 见下表细分 | 包含 UV |
+| **GetAssertion** | < 2 秒 | 见下表细分 | 包含 UV |
+| **ClientPIN** | < 500 ms | 取决于子命令 | PIN 操作 |
+| **Reset** | < 1 秒 | 清除所有数据 | 重置操作 |
+| **CredentialManagement** | < 200 ms | 枚举/删除 | 凭证管理 |
+| **Selection** | < 100 ms | LED 反馈 | 选择认证器 |
+
+**MakeCredential 性能细分**：
+
+| 步骤 | 目标时间 | 累计时间 |
+|------|----------|----------|
+| CBOR 解析 | < 10 ms | 10 ms |
+| excludeList 检查 | < 50 ms | 60 ms |
+| UV 验证（指纹） | < 1000 ms | 1060 ms |
+| 密钥生成 | < 100 ms | 1160 ms |
+| 凭证存储 | < 50 ms | 1210 ms |
+| authData 生成 | < 10 ms | 1220 ms |
+| attestation 签名 | < 100 ms | 1320 ms |
+| CBOR 响应编码 | < 10 ms | 1330 ms |
+| **总计** | **< 1.5 秒** | - |
+
+**GetAssertion 性能细分**：
+
+| 步骤 | 目标时间 | 累计时间 |
+|------|----------|----------|
+| CBOR 解析 | < 10 ms | 10 ms |
+| 凭证查找 | < 50 ms | 60 ms |
+| UV 验证（指纹） | < 1000 ms | 1060 ms |
+| authData 生成 | < 10 ms | 1070 ms |
+| ES256 签名 | < 100 ms | 1170 ms |
+| CBOR 响应编码 | < 10 ms | 1180 ms |
+| **总计** | **< 1.2 秒** | - |
+
+### 10.6 存储模块性能指标
+
+| 操作 | 目标时间 | 备注 |
+|------|----------|------|
+| **凭证创建** | < 50 ms | 写入 Flash |
+| **凭证读取** | < 10 ms | 从 Flash 读取 |
+| **凭证更新** | < 50 ms | 擦除 + 写入 |
+| **凭证删除** | < 50 ms | 标记删除 |
+| **凭证枚举（10 个）** | < 100 ms | 遍历所有 |
+| **凭证查找（按 rpId）** | < 20 ms | 遍历匹配 |
+| **凭证查找（按 ID）** | < 5 ms | 索引查找 |
+| **配置读取** | < 10 ms | 从 Flash/NVS |
+| **配置写入** | < 50 ms | 写入 Flash/NVS |
+| **指纹映射读取** | < 10 ms | 从 Flash |
+| **指纹映射写入** | < 50 ms | 写入 Flash |
+
+### 10.7 通信模块性能指标
+
+| 操作 | 目标时间 | 备注 |
+|------|----------|------|
+| **USB HID 初始化** | < 100 ms | 设备枚举 |
+| **USB HID 发送（64 字节）** | < 5 ms | 中断传输 |
+| **USB HID 接收（64 字节）** | < 5 ms | 中断传输 |
+| **USB 消息分片发送（1 KB）** | < 50 ms | 约 18 个报告 |
+| **USB 消息分片接收（1 KB）** | < 50 ms | 约 18 个报告 |
+| **BLE GATT 初始化** | < 500 ms | 服务注册 |
+| **BLE 广播启动** | < 100 ms | 开始广播 |
+| **BLE 连接建立** | < 1 秒 | 连接时间 |
+| **BLE MTU 协商** | < 100 ms | MTU 交换 |
+| **BLE GATT 写入（64 字节）** | < 10 ms | Control Point |
+| **BLE GATT 通知（64 字节）** | < 10 ms | Status 通知 |
+| **BLE 消息分片发送（1 KB）** | < 100 ms | MTU 64 字节 |
+
+### 10.8 内存使用预算
+
+| 内存区域 | 总大小 | 已使用 | 预留 | 使用率 |
+|----------|--------|--------|------|--------|
+| **IRAM（指令 RAM）** | 128 KB | ~60 KB | ~30 KB | ~47% |
+| **DRAM（数据 RAM）** | 384 KB | ~150 KB | ~50 KB | ~39% |
+| **PSRAM** | 8 MB | ~1 MB | ~5 MB | ~12% |
+| **Flash（固件）** | 8 MB | ~2 MB | ~2 MB | ~25% |
+
+**主要内存消耗**：
+
+| 模块 | RAM 消耗 | Flash 消耗 | 说明 |
+|------|----------|------------|------|
+| **ESP-IDF 基础** | ~80 KB | ~500 KB | 基础框架 |
+| **FreeRTOS** | ~10 KB | ~20 KB | 实时操作系统 |
+| **USB 协议栈** | ~20 KB | ~100 KB | TinyUSB |
+| **BLE 协议栈** | ~50 KB | ~200 KB | Bluedroid |
+| **CryptoAuthLib** | ~10 KB | ~50 KB | ATECC608A 驱动 |
+| **CBOR 库** | ~5 KB | ~20 KB | CBOR 编解码 |
+| **CTAP 协议栈** | ~30 KB | ~100 KB | FIDO2 协议 |
+| **指纹模块** | ~20 KB | ~50 KB | FPM383C 驱动 |
+| **应用逻辑** | ~30 KB | ~100 KB | 主程序 |
+
+### 10.9 Flash 存储预算
+
+| 分区 | 大小 | 已使用 | 使用率 | 说明 |
+|------|------|--------|--------|------|
+| **factory** | 1.5 MB | ~1 MB | ~67% | 固件主分区 |
+| **ota_0** | 1.5 MB | - | 0% | OTA 分区 A |
+| **ota_1** | 1.5 MB | - | 0% | OTA 分区 B |
+| **credential** | 128 KB | ~13 KB | ~10% | 凭证存储（64 个） |
+| **fingerprint** | 64 KB | ~1 KB | ~2% | 指纹映射（10 个） |
+| **config** | 32 KB | ~1 KB | ~3% | 设备配置 |
+| **nvs** | 24 KB | ~5 KB | ~21% | NVS 存储 |
+| **otadata** | 8 KB | ~1 KB | ~12% | OTA 状态 |
+
+### 10.10 功耗预算
+
+| 状态 | 功耗 | 说明 |
+|------|------|------|
+| **深度睡眠** | < 10 μA | USB 断开，BLE 关闭 |
+| **USB 待机** | < 1 mA | USB 连接，空闲 |
+| **BLE 待机** | < 2 mA | BLE 连接，空闲 |
+| **USB 认证** | < 80 mA | 认证操作中 |
+| **BLE 认证** | < 100 mA | BLE 认证操作中 |
+| **指纹采集** | < 50 mA | FPM383C 工作中 |
+| **峰值功耗** | < 150 mA | 所有模块工作 |
 
 ---
 
 ## 十一、附录
 
-（待补充）
+### 11.1 ATECC608A 槽位配置表
+
+**ATECC608A 密钥槽位分配**：
+
+| 槽位 | 用途 | 密钥类型 | 配置 | 权限 | 说明 |
+|------|------|----------|------|------|------|
+| **Slot 0** | 凭证密钥 1 | P-256 ECC | Private | Sign, ExternalSign | 第一个用户凭证 |
+| **Slot 1** | 凭证密钥 2 | P-256 ECC | Private | Sign, ExternalSign | 第二个用户凭证 |
+| **Slot 2** | 凭证密钥 3 | P-256 ECC | Private | Sign, ExternalSign | 第三个用户凭证 |
+| **Slot 3** | 凭证密钥 4 | P-256 ECC | Private | Sign, ExternalSign | 第四个用户凭证 |
+| **Slot 4** | 凭证密钥 5 | P-256 ECC | Private | Sign, ExternalSign | 第五个用户凭证 |
+| **Slot 5** | 凭证密钥 6 | P-256 ECC | Private | Sign, ExternalSign | 第六个用户凭证 |
+| **Slot 6** | 凭证密钥 7 | P-256 ECC | Private | Sign, ExternalSign | 第七个用户凭证 |
+| **Slot 7** | 凭证密钥 8 | P-256 ECC | Private | Sign, ExternalSign | 第八个用户凭证 |
+| **Slot 8** | 凭证密钥 9 | P-256 ECC | Private | Sign, ExternalSign | 第九个用户凭证 |
+| **Slot 9** | 凭证密钥 10 | P-256 ECC | Private | Sign, ExternalSign | 第十个用户凭证 |
+| **Slot 10** | ECDH 临时密钥 | P-256 ECC | ECDH | ECDH, Write | ClientPIN 临时密钥 |
+| **Slot 11** | 保留 | - | - | - | 未来扩展 |
+| **Slot 12** | 保留 | - | - | - | 未来扩展 |
+| **Slot 13** | 保留 | - | - | - | 未来扩展 |
+| **Slot 14** | Attestation 密钥 | P-256 ECC | Private | Sign | 认证器 Attestation |
+| **Slot 15** | PIN 加密密钥 | P-256 ECC | Private | ECDH | PIN 加密通道 |
+
+**ATECC608A 槽位配置详情**：
+
+```c
+// 槽位配置结构（CryptoAuthLib 格式）
+typedef struct {
+    uint16_t slot_config;       // 槽位配置字
+    uint16_t key_config;        // 密钥配置字
+    uint8_t  is_private;        // 是否为私钥槽位
+    uint8_t  write_key;         // 写入密钥槽位
+    uint8_t  write_config;      // 写入配置
+    uint8_t  use_flags;         // 使用标志
+    uint8_t  update_count;      // 更新计数
+} atecc_slot_config_t;
+
+// 凭证密钥槽位配置（Slot 0-9）
+#define SLOT_CONFIG_CREDENTIAL { \
+    .slot_config = 0x8000,       \  // PrivateKey, SignAuthorized
+    .key_config  = 0x0018,       \  // SignExternal, GenKey
+    .is_private  = 1,            \
+    .write_key   = 0,            \
+    .write_config = 0,           \
+    .use_flags   = 0xFF,         \  // 无限制使用
+    .update_count = 0            \
+}
+
+// Attestation 密钥槽位配置（Slot 14）
+#define SLOT_CONFIG_ATTESTATION { \
+    .slot_config = 0x8000,        \  // PrivateKey, SignAuthorized
+    .key_config  = 0x0010,        \  // SignExternal
+    .is_private  = 1,             \
+    .write_key   = 0,             \
+    .write_config = 0,            \
+    .use_flags   = 0xFF,          \  // 无限制使用
+    .update_count = 0             \
+}
+
+// PIN 密钥槽位配置（Slot 15）
+#define SLOT_CONFIG_PIN { \
+    .slot_config = 0x4000, \  // ECDHAuthorized
+    .key_config  = 0x0004, \  // ECDH
+    .is_private  = 1,      \
+    .write_key   = 0,      \
+    .write_config = 0,     \
+    .use_flags   = 0xFF,   \  // 无限制使用
+    .update_count = 0      \
+}
+
+// ECDH 临时槽位配置（Slot 10）
+#define SLOT_CONFIG_ECDH_TEMP { \
+    .slot_config = 0x0000,      \  // 可写入
+    .key_config  = 0x0004,      \  // ECDH
+    .is_private  = 0,           \  // 非私钥
+    .write_key   = 0,           \
+    .write_config = 0,          \
+    .use_flags   = 0xFF,        \  // 无限制使用
+    .update_count = 0           \
+}
+```
+
+**ATECC608A 槽位权限说明**：
+
+| 权限 | 值 | 说明 |
+|------|-----|------|
+| **PrivateKey** | 0x8000 | 私钥槽位，密钥不可读出 |
+| **SignAuthorized** | 0x4000 | 允许签名操作 |
+| **ECDHAuthorized** | 0x4000 | 允许 ECDH 操作 |
+| **SignExternal** | 0x0010 | 允许外部签名（输入数据） |
+| **GenKey** | 0x0008 | 允许生成密钥 |
+| **ECDH** | 0x0004 | 允许 ECDH 操作 |
+| **Write** | 0x0002 | 允许写入 |
+| **Read** | 0x0001 | 允许读取 |
+
+---
+
+### 11.2 IBio AAGUID 定义
+
+**AAGUID（Authenticator Attestation Global Unique Identifier）**：
+
+| 字段 | 值 | 说明 |
+|------|-----|------|
+| **AAGUID** | `IBIO-FIDO-2026-0001` | IBio 设备唯一标识 |
+| **字节表示** | `49 42 49 4F 2D 46 49 44 4F 2D 32 30 32 36 2D 30 30 30 31` | 16 字节 |
+| **用途** | Attestation、GetInfo | 标识认证器型号 |
+
+```c
+// AAGUID 定义（16 字节）
+#define IBIO_AAGUID { \
+    0x49, 0x42, 0x49, 0x4F, \  // "IBIO"
+    0x2D, 0x46, 0x49, 0x44, \  // "-FID"
+    0x4F, 0x2D, 0x32, 0x30, \  // "O-20"
+    0x32, 0x36, 0x2D, 0x30    \  // "26-0"
+}
+```
+
+---
+
+### 11.3 引脚定义汇总
+
+```c
+/**
+ * @file ibio_pins.h
+ * @brief IBio 引脚定义
+ */
+
+#ifndef IBIO_PINS_H
+#define IBIO_PINS_H
+
+// ========== UART 引脚（FPM383C 指纹传感器） ==========
+#define GPIO_UART_TX        16      // FPM383C UART TX（MCU → 模块）
+#define GPIO_UART_RX        17      // FPM383C UART RX（模块 → MCU）
+#define GPIO_UART_PORT      0       // UART 端口号
+
+// ========== FPM383C 控制引脚 ==========
+#define GPIO_FP_EN          18      // FPM383C 使能信号
+#define GPIO_FP_TOUCH       4       // FPM383C 触摸检测（GPIO4，Strapping Pin）
+
+// ========== I2C 引脚（ATECC608A 安全芯片） ==========
+#define GPIO_I2C_SDA        21      // ATECC608A I2C SDA
+#define GPIO_I2C_SCL        22      // ATECC608A I2C SCL
+#define GPIO_I2C_BUS        0       // I2C 总线号
+#define GPIO_SEC_RST        23      // ATECC608A 复位信号（可选）
+
+// ========== USB 引脚（内置 USB PHY） ==========
+#define GPIO_USB_DP         20      // USB D+（内置 PHY）
+#define GPIO_USB_DN         19      // USB D-（内置 PHY）
+
+// ========== LED 引脚 ==========
+#define GPIO_LED_RED        25      // 状态指示红灯
+#define GPIO_LED_GREEN      26      // 状态指示绿灯
+
+// ========== UART 参数 ==========
+#define UART_BAUDRATE       57600   // FPM383C 默认波特率
+#define UART_RX_BUFFER_SIZE 2048    // 接收缓冲区大小
+#define UART_TX_BUFFER_SIZE 1024    // 发送缓冲区大小
+
+// ========== I2C 参数 ==========
+#define I2C_FREQUENCY       400000  // I2C 时钟频率（400 kHz）
+#define ATECC608A_ADDR      0x60    // ATECC608A 7-bit 地址
+
+// ========== LED 状态定义 ==========
+typedef enum {
+    LED_STATE_OFF = 0,          // 关闭
+    LED_STATE_RED = 1,          // 红灯
+    LED_STATE_GREEN = 2,        // 绿灯
+    LED_STATE_YELLOW = 3,       // 黄灯（红+绿）
+    LED_STATE_BLINK_RED = 4,    // 红灯闪烁
+    LED_STATE_BLINK_GREEN = 5,  // 绿灯闪烁
+} led_state_t;
+
+#endif /* IBIO_PINS_H */
+```
+
+---
+
+### 11.4 设备能力声明
+
+**IBio 认证器能力（GetInfo 响应）**：
+
+```json
+{
+  "versions": ["FIDO_2_0", "FIDO_2_1_PRE"],
+  "extensions": ["credProtect", "hmac-secret"],
+  "aaguid": "4942494F-2D46-4944-4F2D-323032362D30303031",
+  "options": {
+    "rk": true,
+    "up": true,
+    "uv": true,
+    "plat": false,
+    "clientPin": true,
+    "largeBlob": false,
+    "ep": false,
+    "bioEnroll": true,
+    "userVerifiedMgmt": false
+  },
+  "maxMsgSize": 1200,
+  "pinUvAuthProtocols": [1, 2],
+  "transports": ["usb", "ble"],
+  "algorithms": [
+    {"type": "public-key", "alg": -7}
+  ],
+  "firmwareVersion": 1,
+  "maxCredentialCountInList": 8,
+  "maxCredentialIdLength": 32,
+  "minPINLength": 4,
+  "uvRetryCount": 8,
+  "pinRetryCount": 8,
+  "maxCredentialCount": 10,
+  "bioEnrollments": {
+    "maxTemplateFriendlyName": 32,
+    "modality": "fingerprint"
+  }
+}
+```
+
+---
+
+### 11.5 版本历史
+
+| 版本 | 日期 | 更新内容 |
+|------|------|----------|
+| **v1.0** | 2026-04-07 | 初始版本，包含完整的模块设计、类图、API、状态机、错误处理、性能预算 |
+
+---
+
+**文档结束**
